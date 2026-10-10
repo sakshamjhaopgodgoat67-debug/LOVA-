@@ -6,7 +6,6 @@ import tempfile
 import asyncio
 from groq import Groq
 from duckduckgo_search import DDGS
-from faster_whisper import WhisperModel
 import edge_tts
 
 # ======================
@@ -14,9 +13,6 @@ import edge_tts
 # ======================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-
-print("Loading Whisper model...")
-whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
 
 chat_history = []
 
@@ -43,20 +39,30 @@ def transcribe_audio(audio):
         return ""
     try:
         sample_rate, audio_data = audio
+
         if len(audio_data.shape) > 1:
             audio_data = audio_data.mean(axis=1)
+
         audio_data = audio_data.astype(np.float32)
         if np.max(np.abs(audio_data)) > 0:
             audio_data = audio_data / np.max(np.abs(audio_data))
 
+        # Save temporary wav file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             wav.write(f.name, sample_rate, (audio_data * 32767).astype(np.int16))
             temp_filename = f.name
 
-        segments, _ = whisper_model.transcribe(temp_filename, beam_size=3, vad_filter=True)
-        text = " ".join([seg.text for seg in segments]).strip()
+        # Use Groq Whisper API (no heavy model in memory)
+        with open(temp_filename, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                file=(temp_filename, file.read()),
+                model="whisper-large-v3",
+                language="en"
+            )
+
         os.unlink(temp_filename)
-        return text
+        return transcription.text.strip()
+
     except Exception as e:
         return f"Transcription error: {str(e)}"
 
@@ -125,8 +131,8 @@ async def text_to_speech(text):
 
 def process_voice(audio):
     user_text = transcribe_audio(audio)
-    if not user_text:
-        return "I couldn't hear you clearly.", format_history(), None
+    if not user_text or user_text.startswith("Transcription error"):
+        return user_text or "I couldn't hear you clearly.", format_history(), None
     reply, history_text = ask_llm(user_text)
     audio_path = asyncio.run(text_to_speech(reply))
     return reply, history_text, audio_path
